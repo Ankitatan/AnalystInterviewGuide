@@ -11,26 +11,162 @@ st.set_page_config(
 )
 
 # -------------------- Theme --------------------
-st.markdown("""
-<style>
-:root { --accent: #8b5cf6; }
-.block-container {padding-top: 1.5rem; padding-bottom: 2.5rem; max-width: 1400px;}
-.hero {
-  padding: 1.6rem 1.8rem; border-radius: 18px;
-  background: linear-gradient(120deg, rgba(139,92,246,.20), rgba(59,130,246,.10));
-  border: 1px solid rgba(139,92,246,.35); margin-bottom: 1.2rem;
+st.markdown(r"""<style>
+:root {
+  --brand: #6d5dfc;
+  --brand-dark: #5145cd;
+  --ink: #172033;
+  --muted: #697386;
+  --line: rgba(120, 130, 155, .22);
+  --surface: #ffffff;
 }
-.hero h1 {margin:0 0 .35rem 0; font-size:2.1rem;}
-.hero p {margin:0; color:var(--text-color); opacity:.82;}
-.kpi {border:1px solid rgba(128,128,128,.25); border-radius:14px; padding:1rem 1.1rem;}
-.kpi .label {font-size:.82rem; opacity:.7;}
-.kpi .value {font-size:1.55rem; font-weight:700; margin-top:.15rem;}
-.tag {display:inline-block; padding:.18rem .55rem; border-radius:999px; font-size:.78rem;
-      background:rgba(139,92,246,.15); border:1px solid rgba(139,92,246,.32);}
-div.stButton > button {border-radius:10px;}
-code {font-size:.92rem;}
-</style>
-""", unsafe_allow_html=True)
+.block-container {
+  max-width: 1440px;
+  padding-top: 1.35rem;
+  padding-bottom: 3rem;
+}
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(ellipse at 12% 0%, rgba(109,93,252,.075), transparent 35%),
+    var(--background-color);
+}
+[data-testid="stSidebar"] {
+  border-right: 1px solid var(--line);
+}
+[data-testid="stSidebar"] > div:first-child {
+  padding-top: 1.4rem;
+}
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 2rem 2.15rem;
+  border-radius: 24px;
+  margin: .25rem 0 1.5rem;
+  background: linear-gradient(115deg, #211b4b 0%, #37317c 48%, #6257d9 100%);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 18px 42px rgba(55,49,124,.17);
+}
+.hero:after {
+  content: "";
+  position: absolute;
+  width: 270px; height: 270px;
+  right: -70px; top: -125px;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 50%;
+  box-shadow: 0 0 0 28px rgba(255,255,255,.035),
+              0 0 0 58px rgba(255,255,255,.025);
+}
+.hero h1 {
+  margin: 0 0 .55rem 0;
+  font-size: clamp(1.8rem, 3vw, 2.65rem);
+  letter-spacing: -.045em;
+  line-height: 1.15;
+  color: #fff;
+}
+.hero p {
+  margin: 0;
+  color: rgba(255,255,255,.82);
+  font-size: 1.03rem;
+  max-width: 680px;
+}
+.eyebrow {
+  display: inline-block;
+  text-transform: uppercase;
+  letter-spacing: .13em;
+  font-size: .72rem;
+  font-weight: 750;
+  color: #c8c3ff;
+  margin-bottom: .8rem;
+}
+.kpi {
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  padding: 1.1rem 1.2rem;
+  min-height: 108px;
+  background: var(--secondary-background-color);
+  box-shadow: 0 4px 15px rgba(20,25,50,.025);
+  transition: transform .18s ease, box-shadow .18s ease;
+}
+.kpi:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(20,25,50,.07);
+}
+.kpi .label {
+  font-size: .76rem;
+  font-weight: 750;
+  letter-spacing: .075em;
+  color: var(--muted);
+}
+.kpi .value {
+  font-size: 1.85rem;
+  line-height: 1.25;
+  font-weight: 800;
+  letter-spacing: -.04em;
+  margin-top: .4rem;
+  color: var(--text-color);
+}
+.tag {
+  display: inline-block;
+  padding: .22rem .62rem;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 650;
+  background: rgba(109,93,252,.11);
+  border: 1px solid rgba(109,93,252,.2);
+  color: var(--text-color);
+  vertical-align: middle;
+}
+.section-kicker {
+  color: var(--muted);
+  font-size: .83rem;
+  margin-top: -.55rem;
+}
+div.stButton > button, div.stDownloadButton > button {
+  border-radius: 11px;
+  min-height: 2.65rem;
+  font-weight: 650;
+  transition: all .16s ease;
+}
+div.stButton > button[kind="primary"] {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+div.stButton > button[kind="primary"]:hover {
+  background: var(--brand-dark);
+  border-color: var(--brand-dark);
+  transform: translateY(-1px);
+}
+div[data-testid="stTextArea"] textarea {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: .91rem;
+  line-height: 1.6;
+  border-radius: 13px;
+}
+div[data-testid="stSelectbox"] > div > div,
+div[data-testid="stTextInput"] > div > div {
+  border-radius: 11px;
+}
+div[data-testid="stTabs"] button {
+  font-weight: 650;
+}
+div[data-testid="stDataFrame"] {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+div[data-testid="stAlert"] {
+  border-radius: 12px;
+}
+hr {
+  border-color: var(--line);
+}
+@media (max-width: 760px) {
+  .block-container { padding-left: 1rem; padding-right: 1rem; }
+  .hero { padding: 1.5rem; border-radius: 18px; }
+  .hero:after { opacity: .45; right: -160px; }
+}
+</style>""", unsafe_allow_html=True)
 
 # -------------------- Sample database --------------------
 CUSTOMERS = [
@@ -194,11 +330,12 @@ if "current_question" not in st.session_state:
     st.session_state.current_question = "B01"
 
 # -------------------- Sidebar --------------------
-st.sidebar.markdown("## 🧪 SQL Interview Lab")
-st.sidebar.caption("Practice SQL with realistic sample data.")
-page = st.sidebar.radio("Navigate", ["Practice Lab", "Explore Data", "Progress & Notes", "About"])
+st.sidebar.markdown("## ◈ SQL Lab")
+st.sidebar.caption("Your hands-on SQL workspace")
 st.sidebar.markdown("---")
-st.sidebar.markdown("### Learning path")
+page = st.sidebar.radio("WORKSPACE", ["Practice Lab", "Explore Data", "Progress & Notes", "About"])
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Your learning path")
 st.sidebar.markdown("🟢 **Basic** · Fundamentals")
 st.sidebar.markdown("🟡 **Intermediate** · Joins & subqueries")
 st.sidebar.markdown("🔴 **Expert** · Windows & analysis")
@@ -207,8 +344,9 @@ st.sidebar.caption("SQL engine: SQLite · Sample data resets each session.")
 # -------------------- Header --------------------
 st.markdown("""
 <div class="hero">
-  <h1>🧪 SQL Interview Lab</h1>
-  <p>Practice. Query. Understand. Build analyst-level SQL confidence.</p>
+  <div class="eyebrow">SQL PRACTICE WORKSPACE</div>
+  <h1>Think in queries.<br>Grow into an analyst.</h1>
+  <p>Build real SQL confidence through focused challenges, instant query results, and a clear view of your progress.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -329,7 +467,7 @@ if page == "Practice Lab":
 
 elif page == "Explore Data":
     st.markdown("## 🗃️ Explore the sample database")
-    st.write("Inspect the tables before writing queries.")
+    st.caption("Get familiar with the tables, fields, and relationships before you start querying.")
     conn = get_connection()
     tabs = st.tabs(["customers", "orders", "employees", "Schema"])
     for tab, table in zip(tabs[:3], ["customers", "orders", "employees"]):
@@ -354,7 +492,8 @@ employees
     st.info("All data is synthetic and created for practice. It is reset when the app session restarts.")
 
 elif page == "Progress & Notes":
-    st.markdown("## 📈 Your practice progress")
+    st.markdown("## Your practice progress")
+    st.caption("A live snapshot of your SQL practice in this session.")
     completed = st.session_state.completed
     metrics = st.columns(3)
     metrics[0].metric("Completed", len(completed), f"of {len(QUESTIONS)}")
@@ -383,6 +522,7 @@ elif page == "Progress & Notes":
 
 elif page == "About":
     st.markdown("## About SQL Interview Lab")
+    st.caption("A lightweight, hands-on environment for building practical SQL skills.")
     st.write("A local, interactive practice environment for aspiring Data Analysts. Run read-only SQL against a small sample database, study hints and solutions, and track progress.")
     st.markdown("### Included")
     st.markdown("- 15 curated questions across Basic, Intermediate, and Expert levels\n- In-browser SQL editor and result tables\n- Search and difficulty filters\n- Hints, reference solutions, and explanations\n- Sample customers, orders, and employees tables\n- Progress dashboard and CSV export")
