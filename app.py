@@ -1,5 +1,6 @@
 import streamlit as st
 import sqlite3
+import re
 import pandas as pd
 from pathlib import Path
 
@@ -333,7 +334,7 @@ if "current_question" not in st.session_state:
 st.sidebar.markdown("## ◈ SQL Lab")
 st.sidebar.caption("Your hands-on SQL workspace")
 st.sidebar.markdown("---")
-page = st.sidebar.radio("WORKSPACE", ["Practice Lab", "Explore Data", "Progress & Notes", "About"])
+page = st.sidebar.radio("WORKSPACE", ["Practice Lab", "Explore Data", "Dataset Manager", "Progress & Notes", "About"])
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Your learning path")
 st.sidebar.markdown("🟢 **Basic** · Fundamentals")
@@ -519,6 +520,203 @@ elif page == "Progress & Notes":
         st.session_state.query_history = []
         st.session_state.show_solution = False
         st.rerun()
+
+elif page == "Dataset Manager":
+    st.markdown("## Dataset manager")
+    st.caption("Import related CSV files, inspect their structure, discover likely keys, and query your uploaded data without changing the built-in practice database.")
+
+    data_dir = Path(__file__).resolve().parent / "data" / "uploaded_csv"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _safe_table_name(filename):
+        name = Path(filename).stem.lower().strip()
+        name = re.sub(r"[^a-z0-9_]+", "_", name)
+        name = re.sub(r"_+", "_", name).strip("_")
+        if not name:
+            name = "uploaded_table"
+        if name[0].isdigit():
+            name = "t_" + name
+        return name[:60]
+
+    def _quote_identifier(identifier):
+        return '"' + str(identifier).replace('"', '""') + '"'
+
+    def _load_uploaded_tables(folder):
+        frames = {}
+        for csv_path in sorted(folder.glob("*.csv")):
+            table_name = _safe_table_name(csv_path.name)
+            # Avoid ambiguous table names if filenames normalize to the same identifier.
+            base, suffix, counter = table_name, 2, 2
+            while table_name in frames:
+                table_name = f"{base}_{counter}"
+                counter += 1
+            try:
+                frames[table_name] = pd.read_csv(csv_path, low_memory=False)
+            except Exception as exc:
+                st.error(f"Could not read {csv_path.name}: {exc}")
+        return frames
+
+    def _likely_keys(frames):
+        primary_keys, foreign_keys = {}, []
+        for table, frame in frames.items():
+            candidates = [c for c in frame.columns if str(c).lower() in {"id", f"{table}_id"} or str(c).lower().endswith("_id")]
+            chosen = None
+            for col in candidates:
+                series = frame[col].dropna()
+                if len(series) and series.is_unique:
+                    chosen = col
+                    break
+            primary_keys[table] = chosen
+        for child_table, frame in frames.items():
+            for col in frame.columns:
+                col_lower = str(col).lower()
+                if not col_lower.endswith("_id"):
+                    continue
+                for parent_table, pk in primary_keys.items():
+                    if parent_table == child_table or pk is None:
+                        continue
+                    expected = {f"{parent_table}_id", f"{parent_table.rstrip('s')}_id", str(pk).lower()}
+                    if col_lower in expected:
+                        foreign_keys.append((child_table, col, parent_table, pk))
+                        break
+        return primary_keys, foreign_keys
+
+    uploaded = st.file_uploader(
+        "Upload one or more CSV files",
+        type=["csv"],
+        accept_multiple_files=True,
+        help="For the Olist dataset, select the CSV files you want to work with, such as orders, customers, order_items, products, payments, and reviews."
+    )
+    action_col, note_col = st.columns([1, 2])
+    with action_col:
+        import_clicked = st.button("Import selected CSVs", type="primary", use_container_width=True)
+    with note_col:
+        st.caption("Imported CSV files are saved locally in the app's data/uploaded_csv folder and remain available after reruns.")
+
+    if import_clicked:
+        if not uploaded:
+            st.warning("Choose at least one CSV file first.")
+        else:
+            saved, errors = 0, []
+            for file in uploaded:
+                try:
+                    # Validate before writing so a malformed file does not replace a usable copy.
+                    pd.read_csv(file, nrows=5)
+                    target = data_dir / Path(file.name).name
+                    target.write_bytes(file.getvalue())
+                    saved += 1
+                except Exception as exc:
+                    errors.append(f"{file.name}: {exc}")
+            if saved:
+                st.success(f"Imported {saved} CSV file(s). They are now available below and will persist on this machine.")
+            for error in errors:
+                st.error(error)
+
+    frames = _load_uploaded_tables(data_dir)
+    if not frames:
+        st.info("No CSV datasets imported yet. Upload the Olist CSV files above to get started.")
+    else:
+        total_rows = sum(len(frame) for frame in frames.values())
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("CSV tables", len(frames))
+        metric_cols[1].metric("Total rows", f"{total_rows:,}")
+        metric_cols[2].metric("Total columns", sum(len(frame.columns) for frame in frames.values()))
+
+        primary_keys, foreign_keys = _likely_keys(frames)
+        st.markdown("### Imported tables")
+        table_names = list(frames.keys())
+        selected_table = st.selectbox("Preview table", table_names, key="dataset_preview_table")
+        preview_df = frames[selected_table]
+        st.dataframe(preview_df.head(100), use_container_width=True, hide_index=True)
+        st.caption(f"Showing up to 100 of {len(preview_df):,} rows · {len(preview_df.columns)} columns")
+
+        with st.expander("Column details and inferred data types", expanded=True):
+            schema_df = pd.DataFrame({
+                "Column": list(preview_df.columns),
+                "Inferred type": [str(dtype) for dtype in preview_df.dtypes],
+                "Non-null values": [int(preview_df[c].notna().sum()) for c in preview_df.columns],
+                "Null values": [int(preview_df[c].isna().sum()) for c in preview_df.columns],
+                "Unique values": [int(preview_df[c].nunique(dropna=True)) for c in preview_df.columns],
+            })
+            st.dataframe(schema_df, use_container_width=True, hide_index=True)
+
+        with st.expander("Relational schema: likely primary and foreign keys", expanded=True):
+            st.caption("These are heuristic suggestions based on unique *_id columns and matching table names. Verify them against the dataset documentation before relying on them as constraints.")
+            key_rows = []
+            for table, frame in frames.items():
+                pk = primary_keys.get(table)
+                key_rows.append({"Table": table, "Likely primary key": pk or "Not detected", "Rows": len(frame), "Columns": len(frame.columns)})
+            st.dataframe(pd.DataFrame(key_rows), use_container_width=True, hide_index=True)
+            if foreign_keys:
+                st.markdown("**Likely foreign-key relationships**")
+                fk_df = pd.DataFrame(foreign_keys, columns=["Child table", "Child column", "Parent table", "Parent key"])
+                st.dataframe(fk_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No likely foreign-key relationships detected yet. Check table/column naming or define relationships using the source dataset documentation.")
+
+        st.markdown("### Query uploaded tables")
+        st.caption("Use SQLite-compatible SQL. Table names are derived from CSV filenames; for example, olist_orders_dataset.csv becomes olist_orders_dataset.")
+        default_sql = f'SELECT * FROM "{selected_table}" LIMIT 20;'
+        sql = st.text_area("SQL query", value=st.session_state.get("uploaded_dataset_sql", default_sql), height=170, key="uploaded_dataset_sql_editor", placeholder="SELECT ... FROM table_name LIMIT 20;")
+        run_col, reset_col = st.columns([1, 1])
+        with run_col:
+            run_uploaded_query = st.button("Run query on uploaded data", type="primary", use_container_width=True)
+        def _reset_uploaded_sql():
+            current_table = st.session_state.get("dataset_preview_table", selected_table)
+            st.session_state["uploaded_dataset_sql_editor"] = f'SELECT * FROM "{current_table}" LIMIT 20;'
+
+        with reset_col:
+            st.button("Reset query", use_container_width=True, on_click=_reset_uploaded_sql)
+
+        if run_uploaded_query:
+            cleaned = sql.strip().rstrip(";").strip()
+            if not cleaned:
+                st.warning("Enter a query first.")
+            elif not re.match(r"^(SELECT|WITH|EXPLAIN)\b", cleaned, flags=re.IGNORECASE):
+                st.error("For safety, only read-only SELECT, WITH, and EXPLAIN queries are allowed.")
+            else:
+                conn = sqlite3.connect(":memory:")
+                try:
+                    for table, frame in frames.items():
+                        frame.to_sql(table, conn, index=False, if_exists="replace")
+                    # SQLite authorizer blocks writes and schema changes even if hidden inside a CTE.
+                    denied_actions = {
+                        sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+                        sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_CREATE_TABLE,
+                        sqlite3.SQLITE_CREATE_TEMP_INDEX, sqlite3.SQLITE_CREATE_TEMP_TABLE,
+                        sqlite3.SQLITE_CREATE_TEMP_TRIGGER, sqlite3.SQLITE_CREATE_TEMP_VIEW,
+                        sqlite3.SQLITE_CREATE_TRIGGER, sqlite3.SQLITE_CREATE_VIEW,
+                        sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_DROP_TABLE,
+                        sqlite3.SQLITE_DROP_TEMP_INDEX, sqlite3.SQLITE_DROP_TEMP_TABLE,
+                        sqlite3.SQLITE_DROP_TEMP_TRIGGER, sqlite3.SQLITE_DROP_TEMP_VIEW,
+                        sqlite3.SQLITE_DROP_TRIGGER, sqlite3.SQLITE_DROP_VIEW,
+                        sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH,
+                        sqlite3.SQLITE_PRAGMA,
+                    }
+                    def _authorize(action, arg1, arg2, db_name, trigger_name):
+                        if action in denied_actions:
+                            return sqlite3.SQLITE_DENY
+                        return sqlite3.SQLITE_OK
+                    conn.set_authorizer(_authorize)
+                    result_df = pd.read_sql_query(cleaned, conn)
+                    st.success(f"Query executed successfully · {len(result_df):,} row(s) returned.")
+                    st.dataframe(result_df, use_container_width=True, hide_index=True)
+                    st.caption(f"{len(result_df):,} row(s) · {len(result_df.columns)} column(s). Preview is rendered by Streamlit; avoid selecting millions of rows at once.")
+                except Exception as exc:
+                    st.error(f"Query could not be executed: {exc}")
+                finally:
+                    conn.close()
+
+        with st.expander("File management"):
+            st.write("Files currently stored for this app:")
+            for csv_path in sorted(data_dir.glob("*.csv")):
+                st.write(f"• {csv_path.name} · {csv_path.stat().st_size / 1024:.1f} KB")
+            st.caption("Removing files here only affects uploaded CSV copies; it does not remove the built-in sample database or existing interview questions.")
+            if st.button("Clear all uploaded CSVs", type="secondary"):
+                for csv_path in data_dir.glob("*.csv"):
+                    csv_path.unlink(missing_ok=True)
+                st.success("Uploaded CSV files removed.")
+                st.rerun()
 
 elif page == "About":
     st.markdown("## About SQL Interview Lab")
