@@ -564,34 +564,36 @@ def init_sample_database():
 
 def sync_uploaded_database():
     """Rebuild the uploaded SQLite database from saved CSV files."""
+    if UPLOADED_DB.exists():
+        UPLOADED_DB.unlink()
+
     conn = sqlite3.connect(UPLOADED_DB)
 
-    for csv_file in sorted(CSV_DIR.glob("*.csv")):
-        table_name = re.sub(
-            r"[^a-zA-Z0-9_]", "_", csv_file.stem
-        ).strip("_")
+    try:
+        for csv_file in sorted(CSV_DIR.glob("*.csv")):
+            table_name = re.sub(
+                r"[^a-zA-Z0-9_]", "_", csv_file.stem
+            ).strip("_")
 
-        if not table_name:
-            continue
+            if not table_name:
+                continue
 
-        try:
-            frame = pd.read_csv(csv_file, low_memory=False)
-            frame.columns = [
-                str(c).strip() or f"column_{i}"
-                for i, c in enumerate(frame.columns)
-            ]
-            frame.to_sql(
-                table_name,
-                conn,
-                if_exists="replace",
-                index=False,
-            )
-        except Exception as exc:
-            st.warning(f"Could not load {csv_file.name}: {exc}")
-
-    conn.commit()
-    conn.close()
-
+            try:
+                frame = pd.read_csv(csv_file, low_memory=False)
+                frame.columns = [
+                    str(c).strip() or f"column_{i}"
+                    for i, c in enumerate(frame.columns)
+                ]
+                frame.to_sql(
+                    table_name,
+                    conn,
+                    if_exists="replace",
+                    index=False,
+                )
+            except Exception as exc:
+                st.warning(f"Could not load {csv_file.name}: {exc}")
+    finally:
+        conn.close()
 
 def get_tables(database_name):
     if database_name == "Sample database":
@@ -837,18 +839,6 @@ ADDITIONAL_OLIST_QUESTIONS = [
 FROM olist_orders_dataset
 WHERE order_status = 'canceled';""",
         "explanation": "WHERE filters the table to cancelled orders.",
-    },
-    {
-        "level": "Basic",
-        "topic": "Aggregation",
-        "title": "Count Orders by Status",
-        "prompt": "Count orders in each order_status category and sort from highest count to lowest.",
-        "hint": "Use COUNT(*), GROUP BY, and ORDER BY.",
-        "solution": """SELECT order_status, COUNT(*) AS total_orders
-FROM olist_orders_dataset
-GROUP BY order_status
-ORDER BY total_orders DESC;""",
-        "explanation": "GROUP BY forms one group per status and COUNT counts its rows.",
     },
     {
         "level": "Basic",
@@ -1195,6 +1185,46 @@ init_sample_database()
 sync_uploaded_database()
 seed_starter_questions()
 
+
+#------this rebuild deletes the existing uploaded SQLite database before importing the CSVs-----#
+
+def sync_uploaded_database():
+    """Rebuild the uploaded SQLite database from saved CSV files."""
+    if UPLOADED_DB.exists():
+        UPLOADED_DB.unlink()
+
+    conn = sqlite3.connect(UPLOADED_DB)
+
+    try:
+        for csv_file in sorted(CSV_DIR.glob("*.csv")):
+            table_name = re.sub(
+                r"[^a-zA-Z0-9_]", "_", csv_file.stem
+            ).strip("_")
+
+            if not table_name:
+                continue
+
+            try:
+                frame = pd.read_csv(csv_file, low_memory=False)
+                frame.columns = [
+                    str(c).strip() or f"column_{i}"
+                    for i, c in enumerate(frame.columns)
+                ]
+
+                frame.to_sql(
+                    table_name,
+                    conn,
+                    if_exists="replace",
+                    index=False,
+                )
+            except Exception as exc:
+                st.warning(
+                    f"Could not load {csv_file.name}: {exc}"
+                )
+
+    finally:
+        conn.close()
+
 # -------------------- Sidebar Navigation --------------------
 
 st.sidebar.title("🧪 SQL Interview Lab")
@@ -1209,11 +1239,6 @@ pages = [
     "Progress & Notes",
     "About",
 ]
-
-if "home_navigation" in st.session_state:
-    default_page = st.session_state.pop("home_navigation")
-else:
-    default_page = "Home"
 
 if "home_navigation" in st.session_state:
     default_page = st.session_state.pop("home_navigation")
@@ -1353,6 +1378,7 @@ elif page == "Practice Lab":
     st.title("Practice Lab")
 
     questions = load_questions()
+
     if not questions:
         st.info("No questions available. Add questions in Question Management.")
     else:
@@ -1369,7 +1395,7 @@ elif page == "Practice Lab":
 
         for q in filtered:
             with st.expander(
-                f'{q["level"]} · {q["title"]}  |  {q["topic"]}'
+                f'{q["level"]} · {q["title"]} | {q["topic"]}'
             ):
                 st.write(q["prompt"])
 
@@ -1396,7 +1422,9 @@ elif page == "Practice Lab":
 
                 with st.expander("Available tables"):
                     tables = get_tables(database_name)
-                    st.write(", ".join(tables) if tables else "No tables found.")
+                    st.write(
+                        ", ".join(tables) if tables else "No tables found."
+                    )
 
                 editor_key = f"editor_{q['id']}"
                 if editor_key not in st.session_state:
@@ -1435,20 +1463,51 @@ elif page == "Practice Lab":
                         use_container_width=True,
                     )
 
+                # Persistent query state for this question
+                success_key = f"query_succeeded_{q['id']}"
+                result_key = f"query_result_{q['id']}"
+                result_db_key = f"query_database_{q['id']}"
 
+                if success_key not in st.session_state:
+                    st.session_state[success_key] = False
+
+                # Execute the query only when Run Query is clicked
                 if run_clicked:
+                    st.session_state[success_key] = False
+                    st.session_state.pop(result_key, None)
+                    st.session_state.pop(result_db_key, None)
+
                     try:
                         result = run_read_only_query(
                             database_name,
                             st.session_state[editor_key],
                         )
+                        st.session_state[result_key] = result
+                        st.session_state[result_db_key] = database_name
+                        st.session_state[success_key] = True
+
+                    except Exception as exc:
+                        st.error(f"Query failed: {exc}")
+
+                # Display the latest successful result after reruns
+                if (
+                    st.session_state[success_key]
+                    and result_key in st.session_state
+                ):
+                    result = st.session_state[result_key]
+
+                    if st.session_state.get(result_db_key) != database_name:
+                        st.session_state[success_key] = False
+                    else:
                         st.success(f"Query returned {len(result)} rows.")
                         st.dataframe(result, use_container_width=True)
 
-                        # Mark completion only when the user is signed in.
                         if st.session_state.logged_in:
-                            if q["expected_rows"] == 0 or (
-                                len(result) == q["expected_rows"]
+                            expected_rows = int(q["expected_rows"])
+
+                            if (
+                                expected_rows == 0
+                                or len(result) == expected_rows
                             ):
                                 if st.button(
                                     "Mark as Completed",
@@ -1460,13 +1519,15 @@ elif page == "Practice Lab":
                                     )
                                     st.success("Progress saved.")
                                     st.rerun()
+                            else:
+                                st.caption(
+                                    f"Expected {expected_rows} rows, "
+                                    f"but your query returned {len(result)}. "
+                                    "Review your result before marking "
+                                    "this question complete."
+                                )
                         else:
-                            st.caption(
-                                "Sign in to save your progress."
-                            )
-
-                    except Exception as exc:
-                        st.error(f"Query failed: {exc}")
+                            st.caption("Sign in to save your progress.")
 
                 if show_solution:
                     st.code(q["solution"], language="sql")
@@ -1476,6 +1537,7 @@ elif page == "Practice Lab":
                 if st.session_state.logged_in:
                     with st.expander("My Notes"):
                         note_key = f"note_{q['id']}"
+
                         if note_key not in st.session_state:
                             st.session_state[note_key] = get_note(
                                 st.session_state.username,
@@ -1838,10 +1900,7 @@ elif page == "Dataset Manager":
 
             destination.write_bytes(uploaded_file.getvalue())
 
-        sync_uploaded_database()
-        st.success("CSV files saved and database refreshed.")
-        st.rerun()
-
+        
     st.subheader("Uploaded CSV Files")
 
     csv_files = sorted(CSV_DIR.glob("*.csv"))
