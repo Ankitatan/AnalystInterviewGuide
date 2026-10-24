@@ -11,6 +11,26 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+
+# -------------------- Session Management --------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+if "question_admin_authenticated" not in st.session_state:
+    st.session_state.question_admin_authenticated = False
+
+if "question_admin_name" not in st.session_state:
+    st.session_state.question_admin_name = None
+
+
+    
 # -------------------- Theme --------------------
 st.markdown(r"""<style>
 :root {
@@ -224,6 +244,71 @@ def get_connection():
     conn.commit()
     return conn
 
+
+# Uploaded CSVs are retained as files and mirrored into a persistent SQLite database.
+APP_DATA_DIR = Path(__file__).resolve().parent / "data"
+UPLOADED_DATA_DIR = APP_DATA_DIR / "uploaded_csv"
+UPLOADED_DB_PATH = APP_DATA_DIR / "uploaded_database.db"
+UPLOADED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def safe_table_name(filename):
+    name = Path(filename).stem.lower().strip()
+    name = re.sub(r"[^a-z0-9_]+", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_") or "uploaded_table"
+    if name[0].isdigit():
+        name = "t_" + name
+    return name[:60]
+
+def load_uploaded_frames():
+    frames = {}
+    for csv_path in sorted(UPLOADED_DATA_DIR.glob("*.csv")):
+        table = safe_table_name(csv_path.name)
+        base, n = table, 2
+        while table in frames:
+            table = f"{base}_{n}"
+            n += 1
+        try:
+            frames[table] = pd.read_csv(csv_path, low_memory=False)
+        except Exception:
+            continue
+    return frames
+
+def sync_uploaded_database():
+    """Rebuild the durable SQLite upload database from saved CSV copies."""
+    frames = load_uploaded_frames()
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(UPLOADED_DB_PATH)
+    try:
+        existing = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        for table in existing:
+            conn.execute('DROP TABLE IF EXISTS "' + table.replace('"', '""') + '"')
+        for table, frame in frames.items():
+            frame.to_sql(table, conn, index=False, if_exists="replace")
+        conn.commit()
+    finally:
+        conn.close()
+    return frames
+
+def available_database_names():
+    names = ["Sample database"]
+    if load_uploaded_frames():
+        names.append("Uploaded CSV database")
+    return names
+
+def database_schema_text(database_name):
+    if database_name == "Uploaded CSV database":
+        frames = load_uploaded_frames()
+        if not frames:
+            return "No uploaded CSV tables found. Open Dataset Manager and import CSV files first."
+        return "\n\n".join(f"{name}({', '.join(map(str, frame.columns))})" for name, frame in frames.items())
+    return "customers(customer_id, first_name, last_name, city, signup_date)\norders(order_id, customer_id, order_date, amount, status)\nemployees(employee_id, employee_name, department, salary, hire_date, manager_id)"
+
+def connect_for_database(database_name):
+    if database_name == "Uploaded CSV database":
+        sync_uploaded_database()
+        return sqlite3.connect(UPLOADED_DB_PATH, check_same_thread=False)
+    return get_connection()
+
 # -------------------- Question bank --------------------
 QUESTIONS = [
     {"id":"B01","level":"Basic","topic":"Filtering","title":"Delhi customers",
@@ -318,6 +403,172 @@ QUESTIONS = [
      "expected_rows":2},
 ]
 
+
+# Optional question pack for the Olist orders dataset. These are imported from
+# Question Management only when the user explicitly chooses to add them.
+OLIST_ORDER_QUESTIONS = [
+    {
+        "level": "Basic", "topic": "Date functions + aggregation", "title": "Order volume by month",
+        "prompt": "Using olist_orders_dataset, count orders by purchase month (YYYY-MM). Return purchase_month and total_orders, ordered chronologically. Which month has the highest order volume?",
+        "hint": "Use strftime('%Y-%m', order_purchase_timestamp), COUNT(*), GROUP BY, and ORDER BY.",
+        "solution": "SELECT strftime('%Y-%m', order_purchase_timestamp) AS purchase_month,\n       COUNT(*) AS total_orders\nFROM olist_orders_dataset\nWHERE order_purchase_timestamp IS NOT NULL\nGROUP BY strftime('%Y-%m', order_purchase_timestamp)\nORDER BY purchase_month;",
+        "explanation": "strftime extracts a YYYY-MM month label. Grouping by that expression counts orders per month; chronological ordering makes the trend easy to inspect.",
+        "expected_rows": 0,
+    },
+    {
+        "level": "Intermediate", "topic": "CASE + date comparison", "title": "Late delivery analysis",
+        "prompt": "For orders with both an actual customer delivery date and an estimated delivery date, calculate the number of late orders and the percentage of eligible delivered orders that were late. An order is late when the actual delivery date is after the estimated date.",
+        "hint": "Use conditional aggregation with CASE WHEN and compare the two dates using julianday(). Exclude missing actual or estimated delivery dates.",
+        "solution": "SELECT COUNT(*) AS eligible_delivered_orders,\n       SUM(CASE WHEN julianday(order_delivered_customer_date) > julianday(order_estimated_delivery_date) THEN 1 ELSE 0 END) AS late_orders,\n       ROUND(100.0 * SUM(CASE WHEN julianday(order_delivered_customer_date) > julianday(order_estimated_delivery_date) THEN 1 ELSE 0 END) / COUNT(*), 2) AS late_order_percentage\nFROM olist_orders_dataset\nWHERE order_delivered_customer_date IS NOT NULL\n  AND order_estimated_delivery_date IS NOT NULL;",
+        "explanation": "The WHERE clause defines the eligible population. Conditional aggregation counts late deliveries, and multiplying by 100.0 calculates a percentage without integer division.",
+        "expected_rows": 1,
+    },
+    {
+        "level": "Intermediate", "topic": "DATE + GROUP BY + LIMIT", "title": "Top 5 busiest purchase days",
+        "prompt": "Find the five calendar dates with the most orders. Return purchase_date and total_orders, sorted from highest to lowest order count. Use purchase timestamps that are not NULL.",
+        "hint": "Use DATE(order_purchase_timestamp), GROUP BY, ORDER BY COUNT(*) DESC, and LIMIT 5.",
+        "solution": "SELECT DATE(order_purchase_timestamp) AS purchase_date,\n       COUNT(*) AS total_orders\nFROM olist_orders_dataset\nWHERE order_purchase_timestamp IS NOT NULL\nGROUP BY DATE(order_purchase_timestamp)\nORDER BY total_orders DESC, purchase_date ASC\nLIMIT 5;",
+        "explanation": "DATE removes the time component so all orders on the same calendar day are counted together. LIMIT returns only the top five days.",
+        "expected_rows": 5,
+    },
+    {
+        "level": "Intermediate", "topic": "Date arithmetic + GROUP BY", "title": "Purchase-to-approval time by status",
+        "prompt": "For each order_status, calculate the average number of days between order purchase and approval. Return order_status and average_approval_days, rounded to two decimals. Exclude rows missing either timestamp.",
+        "hint": "Subtract julianday(order_purchase_timestamp) from julianday(order_approved_at), then use AVG() and GROUP BY order_status.",
+        "solution": "SELECT order_status,\n       ROUND(AVG(julianday(order_approved_at) - julianday(order_purchase_timestamp)), 2) AS average_approval_days\nFROM olist_orders_dataset\nWHERE order_purchase_timestamp IS NOT NULL\n  AND order_approved_at IS NOT NULL\nGROUP BY order_status\nORDER BY order_status;",
+        "explanation": "SQLite's julianday() converts timestamps to day numbers, so subtracting them yields elapsed days. AVG calculates the mean for each status group.",
+        "expected_rows": 0,
+    },
+    {
+        "level": "Expert", "topic": "Date arithmetic + window functions", "title": "Orders delivered earlier than estimated",
+        "prompt": "For orders delivered before their estimated delivery date, calculate how many days early each order arrived and rank orders from most days early to least. Return order_id, order_delivered_customer_date, order_estimated_delivery_date, days_early, and early_delivery_rank.",
+        "hint": "Use julianday(estimated date) - julianday(actual date), and ROW_NUMBER() OVER (ORDER BY that difference DESC). Exclude missing dates.",
+        "solution": "WITH early_orders AS (\n  SELECT order_id, order_delivered_customer_date, order_estimated_delivery_date,\n         ROUND(julianday(order_estimated_delivery_date) - julianday(order_delivered_customer_date), 2) AS days_early\n  FROM olist_orders_dataset\n  WHERE order_delivered_customer_date IS NOT NULL\n    AND order_estimated_delivery_date IS NOT NULL\n    AND julianday(order_delivered_customer_date) < julianday(order_estimated_delivery_date)\n)\nSELECT order_id, order_delivered_customer_date, order_estimated_delivery_date, days_early,\n       ROW_NUMBER() OVER (ORDER BY days_early DESC, order_id) AS early_delivery_rank\nFROM early_orders\nORDER BY early_delivery_rank;",
+        "explanation": "The CTE filters to genuinely early deliveries and computes the number of days early. ROW_NUMBER assigns a unique rank, using order_id as a deterministic tie-breaker.",
+        "expected_rows": 0,
+    },
+    {
+        "level": "Intermediate", "topic": "NULL handling + aggregation", "title": "Orders missing customer delivery dates",
+        "prompt": "Find orders that have a purchase timestamp but no customer delivery timestamp. Group them by order_status and return order_status and missing_delivery_orders, sorted by the largest count first.",
+        "hint": "Filter with order_purchase_timestamp IS NOT NULL and order_delivered_customer_date IS NULL, then GROUP BY order_status.",
+        "solution": "SELECT order_status, COUNT(*) AS missing_delivery_orders\nFROM olist_orders_dataset\nWHERE order_purchase_timestamp IS NOT NULL\n  AND order_delivered_customer_date IS NULL\nGROUP BY order_status\nORDER BY missing_delivery_orders DESC, order_status;",
+        "explanation": "IS NULL correctly identifies missing delivery timestamps. Grouping by status helps distinguish orders that may still be processing from other statuses.",
+        "expected_rows": 0,
+    },
+]
+
+
+# -------------------- Persistent question bank --------------------
+import os
+from datetime import datetime, timezone
+
+QUESTION_DB_PATH = Path(__file__).resolve().parent / "question_bank.db"
+
+
+def _question_db():
+    conn = sqlite3.connect(QUESTION_DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_admin_table():
+    with _question_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                username TEXT PRIMARY KEY,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+
+def _admin_count():
+    with _question_db() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM admins").fetchone()[0])
+
+
+def _password_digest(password, salt):
+    import hashlib
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 310000).hex()
+
+
+def _create_admin(username, password):
+    import secrets
+    salt = secrets.token_hex(16)
+    digest = _password_digest(password, salt)
+    with _question_db() as conn:
+        conn.execute("INSERT INTO admins (username, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                     (username.strip(), salt, digest, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+
+
+def _verify_admin(username, password):
+    import hmac
+    with _question_db() as conn:
+        row = conn.execute("SELECT username, password_salt, password_hash FROM admins WHERE username = ?", (username.strip(),)).fetchone()
+    if not row:
+        return False
+    return hmac.compare_digest(_password_digest(password, row["password_salt"]), row["password_hash"])
+
+
+def _init_question_bank():
+    with _question_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                id TEXT PRIMARY KEY,
+                level TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                title TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                hint TEXT NOT NULL DEFAULT '',
+                solution TEXT NOT NULL DEFAULT '',
+                explanation TEXT NOT NULL DEFAULT '',
+                expected_rows INTEGER NOT NULL DEFAULT 0,
+                database_name TEXT NOT NULL DEFAULT 'Sample database',
+                contributor_github TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT '',
+                updated_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        # Backward-compatible migration for an existing question bank.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(questions)").fetchall()}
+        if "database_name" not in columns:
+            conn.execute("ALTER TABLE questions ADD COLUMN database_name TEXT NOT NULL DEFAULT 'Sample database'")
+        count = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+        if count == 0:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for q in QUESTIONS:
+                conn.execute("""INSERT INTO questions
+                    (id, level, topic, title, prompt, hint, solution, explanation,
+                     expected_rows, contributor_github, created_by, updated_by, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (q["id"], q["level"], q["topic"], q["title"], q["prompt"], q["hint"],
+                     q["solution"], q["explanation"], int(q.get("expected_rows", 0)),
+                     "sql-interview-lab", "migration", "migration", now, now))
+
+
+def _load_question_bank():
+    with _question_db() as conn:
+        rows = conn.execute("SELECT * FROM questions ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def _github_profile(username):
+    username = (username or "").strip().lstrip("@").strip()
+    if not username:
+        return "", ""
+    # Keep only GitHub username characters to avoid malformed profile links.
+    username = re.sub(r"[^A-Za-z0-9-]", "", username)[:39]
+    return username, f"https://github.com/{username}" if username else ""
+
+
+_init_question_bank()
+_init_admin_table()
+QUESTIONS = _load_question_bank()
+
+
 # -------------------- Session state --------------------
 if "completed" not in st.session_state:
     st.session_state.completed = set()
@@ -334,13 +585,13 @@ if "current_question" not in st.session_state:
 st.sidebar.markdown("## ◈ SQL Lab")
 st.sidebar.caption("Your hands-on SQL workspace")
 st.sidebar.markdown("---")
-page = st.sidebar.radio("WORKSPACE", ["Practice Lab", "Explore Data", "Dataset Manager", "Progress & Notes", "About"])
+page = st.sidebar.radio("WORKSPACE", ["Practice Lab", "Question Management", "Explore Data", "Dataset Manager", "Progress & Notes", "About"])
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Your learning path")
 st.sidebar.markdown("🟢 **Basic** · Fundamentals")
 st.sidebar.markdown("🟡 **Intermediate** · Joins & subqueries")
 st.sidebar.markdown("🔴 **Expert** · Windows & analysis")
-st.sidebar.caption("SQL engine: SQLite · Sample data resets each session.")
+st.sidebar.caption("SQL engine: SQLite · Uploaded CSV data is saved locally.")
 
 # -------------------- Header --------------------
 st.markdown("""
@@ -389,13 +640,18 @@ if page == "Practice Lab":
         level_icon = {"Basic":"🟢", "Intermediate":"🟡", "Expert":"🔴"}[q["level"]]
         st.markdown(f"### {level_icon} {q['title']}  <span class='tag'>{q['level']}</span> <span class='tag'>{q['topic']}</span>", unsafe_allow_html=True)
         st.markdown(q["prompt"])
+        st.caption(f"Database: {q.get('database_name', 'Sample database')}")
+        contributor, contributor_url = _github_profile(q.get("contributor_github", ""))
+        if contributor:
+            st.markdown(f"Contributed by [@{contributor}]({contributor_url}) · GitHub", unsafe_allow_html=False)
         with st.expander("💡 Hint"):
             st.write(q["hint"])
 
         schema_tab, editor_tab = st.tabs(["📚 Schema reference", "⌨️ SQL editor"])
         with schema_tab:
-            st.markdown("**Available tables**")
-            st.code("customers(customer_id, first_name, last_name, city, signup_date)\norders(order_id, customer_id, order_date, amount, status)\nemployees(employee_id, employee_name, department, salary, hire_date, manager_id)", language="text")
+            st.markdown(f"**Database:** `{q.get('database_name', 'Sample database')}`")
+            st.markdown("**Available tables and columns**")
+            st.code(database_schema_text(q.get("database_name", "Sample database")), language="text")
         with editor_tab:
             default_query = st.session_state.get(f"query_{q['id']}", "")
             sql = st.text_area("Write your SQL query", value=default_query, height=190,
@@ -424,7 +680,7 @@ if page == "Practice Lab":
                     st.error("For safety, this lab only accepts SELECT-style queries (SELECT, WITH, or EXPLAIN).")
                 else:
                     try:
-                        conn = get_connection()
+                        conn = connect_for_database(q.get("database_name", "Sample database"))
                         result = pd.read_sql_query(cleaned, conn)
                         conn.close()
                         st.session_state.attempts[q["id"]] = st.session_state.attempts.get(q["id"], 0) + 1
@@ -432,7 +688,7 @@ if page == "Practice Lab":
                         st.session_state.query_history = st.session_state.query_history[:20]
                         st.session_state[f"result_{q['id']}"] = result
                         st.session_state[f"ran_{q['id']}"] = True
-                        if len(result) == q["expected_rows"]:
+                        if int(q.get("expected_rows", 0)) > 0 and len(result) == int(q["expected_rows"]):
                             st.session_state.completed.add(q["id"])
                             st.success(f"Query ran successfully · {len(result)} rows returned. Row count matches the reference result.")
                         else:
@@ -465,6 +721,223 @@ if page == "Practice Lab":
                 st.session_state.current_question = all_ids[current_idx+1]
                 st.session_state.show_solution = False
                 st.rerun()
+
+
+elif page == "Question Management":
+    st.markdown("## Question Management")
+    st.caption("Shared question bank · Authorized editors only · Changes are saved to the persistent SQLite database.")
+
+    # First-run setup: create the initial admin account directly in the app.
+    if _admin_count() == 0:
+        st.info("First-time setup: create the administrator account that will manage the shared question bank.")
+        with st.form("initial_admin_setup"):
+            setup_username = st.text_input("Choose admin username")
+            setup_password = st.text_input("Choose a strong password", type="password")
+            setup_confirm = st.text_input("Confirm password", type="password")
+            setup_submit = st.form_submit_button("Create admin account", type="primary")
+        if setup_submit:
+            if len(setup_username.strip()) < 3:
+                st.error("Admin username must contain at least 3 characters.")
+            elif len(setup_password) < 12:
+                st.error("Use a password with at least 12 characters.")
+            elif setup_password != setup_confirm:
+                st.error("Passwords do not match.")
+            else:
+                _create_admin(setup_username, setup_password)
+
+                st.session_state.question_admin_authenticated = True
+                st.session_state.question_admin_name = setup_username.strip()
+
+                # Keep the general session state consistent too
+                st.session_state.logged_in = True
+                st.session_state.username = setup_username.strip()
+                st.session_state.role = "admin"
+
+                st.success("Admin account created. You are now signed in.")
+                st.rerun()
+            st.stop()
+
+    if not st.session_state.get("question_admin_authenticated", False):
+        with st.form("question_admin_login"):
+            st.markdown("### Admin sign in")
+            admin_username = st.text_input("Admin username")
+            admin_password = st.text_input("Admin password", type="password")
+            login_clicked = st.form_submit_button("Sign in", type="primary")
+        if login_clicked:
+            if _verify_admin(admin_username, admin_password):
+                st.session_state.question_admin_authenticated = True
+            st.session_state.question_admin_name = admin_username.strip()
+
+            st.session_state.logged_in = True
+            st.session_state.username = admin_username.strip()
+            st.session_state.role = "admin"
+
+            st.success("Signed in as question-bank admin.")
+            st.rerun()
+        else:
+            st.error("Incorrect admin username or password.")
+        st.stop()
+
+    else:
+            top_left, top_right = st.columns([4, 1])
+            with top_left:
+                st.success(f"Signed in as {st.session_state.get('question_admin_name', 'admin')}")
+            with top_right:
+                if st.button("Sign out", use_container_width=True):
+                    st.session_state.question_admin_authenticated = False
+                    st.session_state.question_admin_name = None
+
+                    st.session_state.logged_in = False
+                    st.session_state.username = None
+                    st.session_state.role = None
+
+                st.rerun()
+
+            records = _load_question_bank()
+            st.metric("Questions in shared bank", len(records))
+            add_tab, edit_tab, delete_tab = st.tabs(["➕ Add question", "✏️ Edit question", "🗑️ Delete question"])
+
+            with add_tab:
+                # One-click import of the six practice questions for the Olist orders table.
+                uploaded_frames = load_uploaded_frames()
+                if "olist_orders_dataset" in uploaded_frames:
+                    st.markdown("### Starter pack: Olist orders")
+                    st.caption("Adds six prepared SQL interview questions linked to the uploaded CSV database. Existing questions with the same title and database are skipped.")
+                    if st.button("Add all 6 Olist questions to the bank", key="add_olist_question_pack", type="secondary"):
+                        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                        contributor = "Ankitatan"
+                        added, skipped = 0, 0
+                        with _question_db() as conn:
+                            for item in OLIST_ORDER_QUESTIONS:
+                                exists = conn.execute(
+                                    "SELECT 1 FROM questions WHERE title = ? AND database_name = ? LIMIT 1",
+                                    (item["title"], "Uploaded CSV database")
+                                ).fetchone()
+                                if exists:
+                                    skipped += 1
+                                    continue
+                                qid = "OL" + datetime.now(timezone.utc).strftime("%y%m%d%H%M%S%f") + str(added)
+                                conn.execute("""INSERT INTO questions
+                                    (id, level, topic, title, prompt, hint, solution, explanation, expected_rows, database_name,
+                                     contributor_github, created_by, updated_by, created_at, updated_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    (qid, item["level"], item["topic"], item["title"], item["prompt"], item["hint"],
+                                     item["solution"], item["explanation"], int(item.get("expected_rows", 0)),
+                                     "Uploaded CSV database", contributor, st.session_state.get("question_admin_name", "admin"),
+                                     st.session_state.get("question_admin_name", "admin"), now, now))
+                                added += 1
+                        st.success(f"Added {added} Olist questions. Skipped {skipped} duplicates.")
+                        st.rerun()
+                database_options = available_database_names()
+                new_database = st.selectbox("Database for this question *", database_options, help="Choose the database the prompt, hint, and SQL solution refer to.", key="new_question_database")
+                with st.expander("View selected database tables and columns", expanded=True):
+                    st.code(database_schema_text(new_database), language="text")
+                with st.form("add_shared_question", clear_on_submit=True):
+                    st.markdown("### Create a question")
+                    new_title = st.text_input("Question title *")
+                    new_prompt = st.text_area("Question prompt *", height=110)
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        new_level = st.selectbox("Difficulty", ["Basic", "Intermediate", "Expert"])
+                        new_topic = st.text_input("Topic *", placeholder="e.g. JOIN, Filtering, Window functions")
+                        new_github = st.text_input("Contributor GitHub username *", placeholder="e.g. octocat")
+                    with c2:
+                        new_expected_rows = st.number_input("Expected row count", min_value=0, max_value=1000000, value=0, step=1)
+                        st.caption("Use 0 if you do not want row-count-based completion checking.")
+                    new_hint = st.text_area("Hint")
+                    new_solution = st.text_area("Reference SQL solution", height=140)
+                    new_explanation = st.text_area("Explanation")
+                    add_submitted = st.form_submit_button("Add to shared bank", type="primary")
+                if add_submitted:
+                    gh_user, _ = _github_profile(new_github)
+                    if not new_title.strip() or not new_prompt.strip() or not new_topic.strip() or not gh_user:
+                        st.error("Please complete the title, prompt, topic, and a valid GitHub username.")
+                    else:
+                        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                        new_id = "Q" + datetime.now(timezone.utc).strftime("%y%m%d%H%M%S%f")
+                        with _question_db() as conn:
+                            conn.execute("""INSERT INTO questions
+                                (id, level, topic, title, prompt, hint, solution, explanation, expected_rows, database_name,
+                                 contributor_github, created_by, updated_by, created_at, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (new_id, new_level, new_topic.strip(), new_title.strip(), new_prompt.strip(),
+                                 new_hint.strip(), new_solution.strip(), new_explanation.strip(), int(new_expected_rows), new_database,
+                                 gh_user, st.session_state.get("question_admin_name", "admin"),
+                                 st.session_state.get("question_admin_name", "admin"), now, now))
+                        st.success(f"Added question {new_id}, attributed to @{gh_user}.")
+                        st.rerun()
+
+            with edit_tab:
+                if not records:
+                    st.info("No questions available to edit.")
+                else:
+                    record_map = {f"{r['id']} · {r['title']}": r for r in records}
+                    chosen_label = st.selectbox("Select a question to edit", list(record_map.keys()), key="edit_question_choice")
+                    selected = record_map[chosen_label]
+                    database_options = available_database_names()
+                    current_db = selected.get("database_name", "Sample database")
+                    if current_db not in database_options:
+                        database_options = [current_db] + database_options
+                    edit_database = st.selectbox("Database for this question *", database_options, index=database_options.index(current_db), key="edit_question_database")
+                    with st.expander("View selected database tables and columns", expanded=True):
+                        st.code(database_schema_text(edit_database), language="text")
+                    with st.form("edit_shared_question"):
+                        edit_title = st.text_input("Question title *", value=selected["title"])
+                        edit_prompt = st.text_area("Question prompt *", value=selected["prompt"], height=110)
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            edit_level = st.selectbox("Difficulty", ["Basic", "Intermediate", "Expert"], index=["Basic", "Intermediate", "Expert"].index(selected["level"]), key="edit_level")
+                            edit_topic = st.text_input("Topic *", value=selected["topic"])
+                            st.text_input("Original contributor GitHub", value=selected.get("contributor_github", ""), disabled=True)
+                        with c2:
+                            edit_expected_rows = st.number_input("Expected row count", min_value=0, max_value=1000000, value=int(selected.get("expected_rows", 0)), step=1, key="edit_expected_rows")
+                            edit_github = st.text_input("GitHub username to attribute this revision to", value=selected.get("contributor_github", ""), help="Leave as the original contributor or enter a contributor to credit for this revision.")
+                        edit_hint = st.text_area("Hint", value=selected.get("hint", ""))
+                        edit_solution = st.text_area("Reference SQL solution", value=selected.get("solution", ""), height=140)
+                        edit_explanation = st.text_area("Explanation", value=selected.get("explanation", ""))
+                        edit_submitted = st.form_submit_button("Save changes", type="primary")
+                    if edit_submitted:
+                        gh_user, _ = _github_profile(edit_github)
+                        if not edit_title.strip() or not edit_prompt.strip() or not edit_topic.strip() or not gh_user:
+                            st.error("Please complete the title, prompt, topic, and a valid GitHub username.")
+                        else:
+                            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            with _question_db() as conn:
+                                conn.execute("""UPDATE questions SET level=?, topic=?, title=?, prompt=?, hint=?, solution=?,
+                                    explanation=?, expected_rows=?, database_name=?, contributor_github=?, updated_by=?, updated_at=? WHERE id=?""",
+                                    (edit_level, edit_topic.strip(), edit_title.strip(), edit_prompt.strip(), edit_hint.strip(),
+                                     edit_solution.strip(), edit_explanation.strip(), int(edit_expected_rows), edit_database, gh_user,
+                                     st.session_state.get("question_admin_name", "admin"), now, selected["id"]))
+                            st.success(f"Updated {selected['id']}.")
+                            st.rerun()
+
+            with delete_tab:
+                if not records:
+                    st.info("No questions available to delete.")
+                else:
+                    delete_map = {f"{r['id']} · {r['title']}": r for r in records}
+                    delete_label = st.selectbox("Select a question to delete", list(delete_map.keys()), key="delete_question_choice")
+                    delete_record = delete_map[delete_label]
+                    st.warning(f"You are about to permanently delete **{delete_record['title']}** ({delete_record['id']}).")
+                    confirm_delete = st.checkbox("I understand this cannot be undone.")
+                    if st.button("Delete question permanently", type="primary", disabled=not confirm_delete):
+                        with _question_db() as conn:
+                            conn.execute("DELETE FROM questions WHERE id=?", (delete_record["id"],))
+                        st.success(f"Deleted {delete_record['id']}.")
+                        st.rerun()
+
+            st.markdown("### Shared question bank and attribution")
+            fresh_records = _load_question_bank()
+            if fresh_records:
+                display_rows = []
+                for record in fresh_records:
+                    gh_user, gh_url = _github_profile(record.get("contributor_github", ""))
+                    display_rows.append({"ID": record["id"], "Title": record["title"], "Difficulty": record["level"],
+                                         "Topic": record["topic"], "Database": record.get("database_name", "Sample database"), "GitHub contributor": f"@{gh_user}" if gh_user else "Not provided",
+                                         "Created": record["created_at"], "Last updated": record["updated_at"]})
+                st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+                st.download_button("Download question bank CSV", pd.DataFrame(display_rows).to_csv(index=False).encode("utf-8"),
+                                   file_name="question_bank.csv", mime="text/csv")
 
 elif page == "Explore Data":
     st.markdown("## 🗃️ Explore the sample database")
@@ -525,7 +998,7 @@ elif page == "Dataset Manager":
     st.markdown("## Dataset manager")
     st.caption("Import related CSV files, inspect their structure, discover likely keys, and query your uploaded data without changing the built-in practice database.")
 
-    data_dir = Path(__file__).resolve().parent / "data" / "uploaded_csv"
+    data_dir = UPLOADED_DATA_DIR
     data_dir.mkdir(parents=True, exist_ok=True)
 
     def _safe_table_name(filename):
@@ -608,7 +1081,8 @@ elif page == "Dataset Manager":
                 except Exception as exc:
                     errors.append(f"{file.name}: {exc}")
             if saved:
-                st.success(f"Imported {saved} CSV file(s). They are now available below and will persist on this machine.")
+                sync_uploaded_database()
+                st.success(f"Imported {saved} CSV file(s). Saved locally and synced to the persistent SQLite database: {UPLOADED_DB_PATH.name}.")
             for error in errors:
                 st.error(error)
 
@@ -616,6 +1090,8 @@ elif page == "Dataset Manager":
     if not frames:
         st.info("No CSV datasets imported yet. Upload the Olist CSV files above to get started.")
     else:
+        sync_uploaded_database()
+        st.caption(f"Persistent uploaded database: `{UPLOADED_DB_PATH}` · tables are available to select when adding or editing questions.")
         total_rows = sum(len(frame) for frame in frames.values())
         metric_cols = st.columns(3)
         metric_cols[0].metric("CSV tables", len(frames))
@@ -715,7 +1191,8 @@ elif page == "Dataset Manager":
             if st.button("Clear all uploaded CSVs", type="secondary"):
                 for csv_path in data_dir.glob("*.csv"):
                     csv_path.unlink(missing_ok=True)
-                st.success("Uploaded CSV files removed.")
+                sync_uploaded_database()
+                st.success("Uploaded CSV files and their tables in the persistent uploaded database were removed.")
                 st.rerun()
 
 elif page == "About":
@@ -723,8 +1200,10 @@ elif page == "About":
     st.caption("A lightweight, hands-on environment for building practical SQL skills.")
     st.write("A local, interactive practice environment for aspiring Data Analysts. Run read-only SQL against a small sample database, study hints and solutions, and track progress.")
     st.markdown("### Included")
-    st.markdown("- 15 curated questions across Basic, Intermediate, and Expert levels\n- In-browser SQL editor and result tables\n- Search and difficulty filters\n- Hints, reference solutions, and explanations\n- Sample customers, orders, and employees tables\n- Progress dashboard and CSV export")
-    st.warning("This educational app runs SQLite in memory. The query editor is restricted to SELECT-style statements; do not expose a production database to an untrusted SQL editor.")
+    st.markdown("- Shared, persistent question bank with GitHub contributor attribution\n- Admin-only add, edit, and delete controls\n- Questions across Basic, Intermediate, and Expert levels\n- Six optional Olist orders challenges covering dates, aggregation, CASE, NULL handling, and window functions\n- Uploadable CSV datasets with table/column schema previews\n- In-browser SQL editor and result tables\n- Search and difficulty filters\n- Hints, reference solutions, and explanations\n- Sample customers, orders, and employees tables\n- Progress dashboard and CSV export")
+    st.markdown("### Project repository")
+    st.markdown("[AnalystInterviewGuide on GitHub](https://github.com/Ankitatan/AnalystInterviewGuide)")
+    st.warning("The built-in sample database is recreated for practice. Uploaded CSV tables are saved locally and mirrored to a persistent SQLite database. The query editor is restricted to read-only SQL; do not expose a production database to an untrusted SQL editor.")
     st.markdown("### SQL dialect")
     st.write("Queries are written for SQLite. Other SQL databases may use different functions or syntax.")
 
